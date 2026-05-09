@@ -16,6 +16,7 @@ import {
   Settings,
   Copy,
   Check,
+  Trash2,
   Plus,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
@@ -172,27 +173,25 @@ export default function App() {
     if (e.target.files && e.target.files[0]) {
       let file = e.target.files[0];
       
-      // Compression options
+      // Strict constraint for Volcengine API: max 4096px, we use 2048px for better compatibility and speed
       const options = {
-        maxSizeMB: 9.5, // slightly under 10MB
+        maxSizeMB: 9,
         maxWidthOrHeight: 2048,
         useWebWorker: true,
       };
 
       try {
-        if (file.size > 9.5 * 1024 * 1024) {
-          addLog(`Image too large (${(file.size / 1024 / 1024).toFixed(2)}MB), compressing...`, "warning");
-          file = await imageCompression(file, options);
-          addLog(`Compressed to ${(file.size / 1024 / 1024).toFixed(2)}MB`, "success");
-        }
+        addLog(`正在处理图像: ${file.name}...`, "info");
+        // Always run through compression to ensure dimensions are within bounds
+        file = await imageCompression(file, options);
+        addLog(`处理完成: ${(file.size / 1024 / 1024).toFixed(2)}MB`, "success");
         
         setImage(file);
         setImageUrl(URL.createObjectURL(file));
         setExternalUrl("");
-        addLog(`Selected image: ${file.name}`);
       } catch (error) {
-        console.error("Compression error:", error);
-        addLog("Compression failed, using original", "error");
+        console.error("Image processing error:", error);
+        addLog("图像处理失败，将尝试直接使用原图", "warning");
         setImage(file);
         setImageUrl(URL.createObjectURL(file));
       }
@@ -270,7 +269,8 @@ export default function App() {
         const historyItem = {
           id: newTaskId,
           name: image ? image.name : (externalUrl?.split('/').pop() || '未命名'),
-          thumbnail: imageUrl,
+          sourceImage: finalImageUrl,
+          thumbnail: null,
           type: fileFormat,
           quality: meshQuality,
           date: new Date().toLocaleTimeString(),
@@ -528,6 +528,7 @@ export default function App() {
     const newItem = {
       id: trimmedId,
       name: "手动添加",
+      sourceImage: null, // 手动添加的任务可能没有源图
       thumbnail: null,
       type: "OBJ", 
       quality: "未知",
@@ -545,17 +546,33 @@ export default function App() {
     addLog(`手动添加任务: ${trimmedId}`, "success");
   };
 
+  const handleDeleteHistoryItem = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    setHistory(prev => {
+      const newHistory = prev.filter(item => item.id !== id);
+      localStorage.setItem("ARK_HISTORY", JSON.stringify(newHistory));
+      return newHistory;
+    });
+    if (taskId === id) {
+      setTaskId(null);
+      setResultUrl(null);
+      setPreviewBlobUrl(null);
+      setStatus("idle");
+    }
+  };
+
   return (
     <div className="h-screen w-full bg-[#020617] text-slate-200 font-sans flex flex-col overflow-hidden select-none">
       {/* Top Navigation */}
       <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur-md shrink-0">
-        <div className="flex items-center space-x-4">
-          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-blue-900/20">V</div>
-          <h1 className="text-lg font-semibold tracking-tight text-white">VolcEngine <span className="text-blue-400">Seed3D</span></h1>
+        <div className="flex items-center space-x-3">
+          <div className="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center text-white shadow-lg shadow-blue-600/20">
+            <Box className="w-6 h-6" />
+          </div>
+          <h1 className="text-xl font-bold tracking-tight text-white">3D 模型生成器</h1>
         </div>
         <div className="flex items-center space-x-6">
           <div className="flex space-x-4 text-[10px] font-bold uppercase tracking-widest text-slate-500">
-            <a href="#" className="hover:text-blue-400 transition-colors">文档</a>
             <button onClick={() => setIsSettingsOpen(true)} className="text-blue-400 hover:text-blue-300 transition-colors uppercase cursor-pointer">设置</button>
           </div>
         </div>
@@ -891,16 +908,30 @@ export default function App() {
               >
                 <div className="flex justify-between items-start mb-2 gap-3">
                   <div className="flex items-center gap-2 overflow-hidden">
-                    {item.thumbnail && (
-                      <div className="w-8 h-8 rounded bg-slate-800 shrink-0 overflow-hidden border border-slate-700">
-                        <img src={item.thumbnail} className="w-full h-full object-cover" alt="" />
+                    {(item.thumbnail || item.sourceImage) && (
+                      <div className="w-10 h-10 rounded-lg bg-slate-800 shrink-0 overflow-hidden border border-slate-700 flex items-center justify-center">
+                        <img 
+                          src={item.thumbnail || item.sourceImage} 
+                          className="w-full h-full object-cover" 
+                          alt="" 
+                          referrerPolicy="no-referrer"
+                        />
                       </div>
                     )}
-                    <span className={`text-[11px] font-bold truncate ${item.status === '成功' ? 'text-blue-400' : 'text-slate-400'}`}>
-                      {item.name}
-                    </span>
+                    <div className="flex flex-col min-w-0">
+                      <span className={`text-[11px] font-bold truncate ${item.status === '成功' ? 'text-blue-400' : 'text-slate-400'}`}>
+                        {item.name}
+                      </span>
+                      <span className="text-[9px] text-slate-600 truncate">{item.date}</span>
+                    </div>
                   </div>
-                  <span className="text-[9px] text-slate-600 whitespace-nowrap">{item.date}</span>
+                  <button 
+                    onClick={(e) => handleDeleteHistoryItem(e, item.id)}
+                    className="p-1 px-1.5 opacity-0 group-hover:opacity-100 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-md transition-all active:scale-95"
+                    title="删除记录"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
                 </div>
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2 flex-wrap">

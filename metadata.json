@@ -1,6 +1,6 @@
 {
-  "name": "Doubao 3D Generator",
-  "description": "An AI-powered 3D model generator using Volcengine Doubao-Seed3D, transforming images and text into high-quality 3D assets.",
+  "name": "3D 模型生成器",
+  "description": "基于火山引擎 Seed3D 2.0 的专业 3D 模型生成工具，支持从图片实时生成高质量 3D 资产。",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }
