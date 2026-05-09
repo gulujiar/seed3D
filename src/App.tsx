@@ -12,7 +12,6 @@ import {
   CheckCircle2, 
   XCircle,
   AlertCircle,
-  UploadCloud,
   Image as ImageIcon,
   Settings,
   Copy,
@@ -332,41 +331,6 @@ export default function App() {
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  const handleFileDrop = async (e: React.DragEvent) => {
-    e.preventDefault();
-    const file = e.dataTransfer.files[0];
-    if (!file) return;
-
-    if (file.name.toLowerCase().endsWith('.zip')) {
-      addLog(`本地手动解压: ${file.name}`, "info");
-      setExtractStatus({ phase: 'extracting', progress: 50, message: "正在读取本地 ZIP..." });
-      try {
-        const zip = await JSZip.loadAsync(file);
-        const files = Object.keys(zip.files);
-        const modelFileName = files.find(f => f.toLowerCase().endsWith('.glb') || f.toLowerCase().endsWith('.obj'));
-        if (modelFileName) {
-          const modelFile = zip.files[modelFileName];
-          const blob = await modelFile.async("blob");
-          const blobUrl = URL.createObjectURL(blob);
-          setPreviewBlobUrl(blobUrl);
-          setFileFormat(modelFileName.toLowerCase().endsWith('.glb') ? 'GLB' : 'OBJ');
-          setModelError(null);
-          setExtractStatus({ phase: 'ready', progress: 100, message: "本地加载完成" });
-        } else {
-          addLog("ZIP 内未找到模型文件", "error");
-        }
-      } catch (err) {
-        addLog("解析本地文件失败", "error");
-      }
-    } else if (file.name.toLowerCase().endsWith('.glb') || file.name.toLowerCase().endsWith('.obj')) {
-      const blobUrl = URL.createObjectURL(file);
-      setPreviewBlobUrl(blobUrl);
-      setFileFormat(file.name.toLowerCase().endsWith('.glb') ? 'GLB' : 'OBJ');
-      setModelError(null);
-      addLog(`本地手动加载: ${file.name}`, "success");
-    }
-  };
-
   const handleDownload = (e: React.MouseEvent | null, url: string, name: string) => {
     if (e) e.stopPropagation();
     
@@ -408,43 +372,32 @@ export default function App() {
       
       if (isZip) {
         setExtractStatus({ phase: 'downloading', progress: 0, message: "正在获取资产数据..." });
-        addLog(`检测到 ZIP 容器，尝试代理提取...`, "info");
+        addLog(`检测到 ZIP 容器，正在尝试并行下载与提取...`, "info");
         try {
-          const directUrl = resultUrl;
-          const proxiedUrl = `https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
-          
-          let response;
-          try {
-            response = await axios.get(proxiedUrl, { 
-              responseType: 'arraybuffer',
-              onDownloadProgress: (progressEvent) => {
-                if (progressEvent.total) {
-                  const percent = (progressEvent.loaded / progressEvent.total) * 100;
-                  setExtractStatus(prev => ({ ...prev, progress: percent * 0.8 })); 
-                }
+          // Direct fetch - many generation APIs now support CORS for their result fields
+          // Use fetch for better stream control if needed, but axios with progress is fine
+          const response = await axios.get(resultUrl, { 
+            responseType: 'arraybuffer',
+            headers: {
+               // Some browsers need this for non-cached direct access
+               'Accept': 'application/zip, application/octet-stream'
+            },
+            onDownloadProgress: (progressEvent) => {
+              if (progressEvent.total) {
+                const percent = (progressEvent.loaded / progressEvent.total) * 100;
+                setExtractStatus(prev => ({ ...prev, progress: percent * 0.8 })); 
               }
-            });
-          } catch (proxyErr) {
-            addLog("代理失败，尝试直通...", "warning");
-            response = await axios.get(directUrl, { 
-              responseType: 'arraybuffer',
-              onDownloadProgress: (progressEvent) => {
-                if (progressEvent.total) {
-                  const percent = (progressEvent.loaded / progressEvent.total) * 100;
-                  setExtractStatus(prev => ({ ...prev, progress: percent * 0.8 })); 
-                }
-              }
-            });
-          }
+            }
+          });
           
           if (!active) return;
-          setExtractStatus({ phase: 'extracting', progress: 85, message: "并行解压 3D 资产..." });
+          setExtractStatus({ phase: 'extracting', progress: 85, message: "正在并行解压 3D 资产..." });
 
           const zip = await JSZip.loadAsync(response.data);
           
           // Find 3D files
           let modelFile: JSZip.JSZipObject | undefined;
-          let detectedFormat = "GLB";
+          let detectedFormat = "OBJ";
 
           const files = Object.keys(zip.files);
           // GLB is preferred for performance
@@ -461,7 +414,7 @@ export default function App() {
           }
 
           if (modelFile) {
-            setExtractStatus({ phase: 'extracting', progress: 95, message: "准备展示模型..." });
+            setExtractStatus({ phase: 'extracting', progress: 95, message: "准备实时渲染..." });
             const blob = await modelFile.async("blob");
             if (!active) return;
             
@@ -477,22 +430,22 @@ export default function App() {
           }
         } catch (err: any) {
           console.error("Fetch/Zip error:", err);
-          const isCors = err.message?.includes('Network Error') || err.message?.includes('CORS') || err.code === 'ERR_NETWORK';
+          const isCors = err.message?.includes('Network Error') || err.code === 'ERR_NETWORK';
           setModelError(isCors 
-            ? "CORS 拦截：浏览器安全策略阻止了模型预览。请先下载文件，然后将其拖入下方虚线框中即可离线预览。" 
-            : "生成内容解析失败，请尝试重新生成或下载。");
-          setExtractStatus({ phase: 'error', progress: 0, message: "预览受限" });
-          addLog(isCors ? "CORS 策略拦截了前端直读" : "解析错误", "error");
+            ? "资源获取受限 (CORS)。浏览器无法直接读取此远程文件，请点击下方按钮手动下载并在本地查看。" 
+            : "资源解析失败，请尝试重新生成或下载。");
+          setExtractStatus({ phase: 'error', progress: 0, message: "获取失败" });
+          addLog(isCors ? "受 CORS 限制，无法前端直读" : "解析错误", "error");
         } finally {
           if (active) {
             setExtractStatus(prev => prev.phase === 'ready' ? prev : { phase: 'idle', progress: 0, message: "" });
           }
         }
       } else {
-        // Direct model file
+        // Normal model file - try direct fetch
         setPreviewBlobUrl(resultUrl);
         setPreviewCache(prev => ({ ...prev, [resultUrl]: { url: resultUrl, format: fileFormat } }));
-        setExtractStatus({ phase: 'ready', progress: 100, message: "直连预览完成" });
+        setExtractStatus({ phase: 'ready', progress: 100, message: "直连预览中" });
       }
     };
 
@@ -672,34 +625,24 @@ export default function App() {
                       initial={{ scale: 0.9, opacity: 0 }}
                       animate={{ scale: 1, opacity: 1 }}
                       className="text-center space-y-4 max-w-sm bg-slate-900/50 backdrop-blur-md p-8 rounded-3xl border border-slate-800"
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={handleFileDrop}
                     >
-                      <div className="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center mx-auto mb-2 border border-dashed border-blue-500/40">
-                        <UploadCloud className="w-8 h-8 text-blue-500" />
+                      <div className="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center mx-auto mb-4">
+                        <Download className="w-8 h-8 text-blue-500" />
                       </div>
-                      <h3 className="text-lg font-bold text-white">预览辅助加载</h3>
-                      <p className="text-[11px] text-slate-400 leading-relaxed px-4">{modelError}</p>
-                      
-                      <div className="space-y-3 pt-2">
-                        <button 
-                          onClick={() => handleDownload(null, resultUrl!, `model_${taskId}.zip`)}
-                          className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-xl text-xs font-bold transition-all shadow-lg shadow-blue-600/20 active:scale-95 w-full flex items-center justify-center gap-2"
-                        >
-                           <Download className="w-3.5 h-3.5" /> 第一步：下载文件
-                        </button>
-                        
-                        <div className="bg-slate-950/60 border border-dashed border-slate-700 p-3 rounded-xl text-[10px] text-slate-500 font-medium">
-                          第二步：将下载的文件 拖拽到这里
-                        </div>
-
-                        <button 
-                          onClick={() => setStatus("idle")}
-                          className="text-slate-600 hover:text-slate-500 text-[10px] font-bold uppercase tracking-widest pt-2"
-                        >
-                           忽略并返回
-                        </button>
-                      </div>
+                      <h3 className="text-lg font-bold text-white">模型已就绪</h3>
+                      <p className="text-sm text-slate-400">{modelError}</p>
+                      <button 
+                        onClick={() => handleDownload(null, resultUrl, `model_${taskId}.zip`)}
+                        className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2 rounded-xl text-xs font-bold transition-all shadow-lg shadow-blue-600/20 active:scale-95 w-full"
+                      >
+                         立即下载模型包 (ZIP)
+                      </button>
+                      <button 
+                        onClick={() => setStatus("idle")}
+                        className="bg-slate-800 hover:bg-slate-700 text-slate-400 px-6 py-2 rounded-xl text-xs font-bold transition-all w-full"
+                      >
+                         返回
+                      </button>
                     </motion.div>
                   ) : previewBlobUrl ? (
                     <>
