@@ -52,7 +52,7 @@ const ModelViewer = ({ url, format }: { url: string; format: string }) => {
             adjustCamera 
             shadows={{ type: 'contact', opacity: 0.4, blur: 2 }}
           >
-            <Center>
+            <Center key={`${url}-${format}`}>
               <Model url={url} format={format} />
             </Center>
           </Stage>
@@ -84,6 +84,7 @@ export default function App() {
   const [taskId, setTaskId] = useState<string | null>(() => localStorage.getItem("ARK_CURRENT_TASK_ID"));
   const [resultUrl, setResultUrl] = useState<string | null>(() => localStorage.getItem("ARK_RESULT_URL"));
   const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
+  const [loadedFormat, setLoadedFormat] = useState<string | null>(null);
   const [extractStatus, setExtractStatus] = useState<{
     phase: 'idle' | 'downloading' | 'extracting' | 'ready' | 'error';
     progress: number;
@@ -420,13 +421,14 @@ export default function App() {
     const processResultUrl = async () => {
       if (!resultUrl) {
         setPreviewBlobUrl(null);
+        setLoadedFormat(null);
         return;
       }
 
       // Check cache first
       if (previewCache[resultUrl]) {
         setPreviewBlobUrl(previewCache[resultUrl].url);
-        setFileFormat(previewCache[resultUrl].format);
+        setLoadedFormat(previewCache[resultUrl].format);
         setExtractStatus({ phase: 'ready', progress: 100, message: "来自缓存" });
         return;
       }
@@ -485,7 +487,7 @@ export default function App() {
             
             const blobUrl = URL.createObjectURL(blob);
             setPreviewBlobUrl(blobUrl);
-            setFileFormat(detectedFormat);
+            setLoadedFormat(detectedFormat);
             setPreviewCache(prev => ({ ...prev, [resultUrl]: { url: blobUrl, format: detectedFormat } }));
             setExtractStatus({ phase: 'ready', progress: 100, message: "解析完成" });
             addLog(`成功从 ZIP 中提取预览模型 (${detectedFormat})`, "success");
@@ -509,6 +511,7 @@ export default function App() {
       } else {
         // Normal model file - try direct fetch
         setPreviewBlobUrl(resultUrl);
+        setLoadedFormat(fileFormat);
         setPreviewCache(prev => ({ ...prev, [resultUrl]: { url: resultUrl, format: fileFormat } }));
         setExtractStatus({ phase: 'ready', progress: 100, message: "直连预览中" });
       }
@@ -529,6 +532,9 @@ export default function App() {
     addLog(`加载任务: ${item.id}`, "info");
     setTaskId(item.id);
     setResultUrl(item.url || null);
+    if (item.type) {
+      setLoadedFormat(item.type);
+    }
     
     if (item.status === '处理中') {
       setStatus("running");
@@ -780,7 +786,7 @@ export default function App() {
                     <>
                       <ModelViewer 
                         url={previewBlobUrl} 
-                        format={fileFormat} 
+                        format={loadedFormat || fileFormat} 
                       />
                       <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex space-x-3 pointer-events-auto">
                         <button 
