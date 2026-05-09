@@ -1,0 +1,6 @@
+{
+  "name": "Doubao 3D Generator",
+  "description": "An AI-powered 3D model generator using Volcengine Doubao-Seed3D, transforming images and text into high-quality 3D assets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}

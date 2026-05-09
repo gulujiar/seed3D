@@ -1,0 +1,957 @@
+import React, { useState, useRef, useEffect, Suspense } from "react";
+import { Canvas, useLoader } from "@react-three/fiber";
+import { OrbitControls, Stage, useTexture, Center, PerspectiveCamera } from "@react-three/drei";
+import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { 
+  Upload, 
+  Box, 
+  Send, 
+  Loader2, 
+  Download, 
+  CheckCircle2, 
+  XCircle,
+  AlertCircle,
+  UploadCloud,
+  Image as ImageIcon,
+  Settings,
+  Copy,
+  Check,
+} from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
+import axios from "axios";
+import imageCompression from "browser-image-compression";
+import JSZip from "jszip";
+
+// 3D Model Viewer Component
+const Model = ({ url, format }: { url: string; format: string }) => {
+  const loader = format.toLowerCase() === "glb" ? GLTFLoader : OBJLoader;
+  const result = useLoader(loader, url);
+  
+  // GLTF returns as a scene, OBJ returns as an object
+  const object = format.toLowerCase() === "glb" ? (result as any).scene : result;
+  
+  return <primitive object={object} scale={1} />;
+};
+
+const ModelViewer = ({ url, format }: { url: string; format: string }) => {
+  return (
+    <div className="w-full h-full bg-neutral-900 rounded-xl overflow-hidden relative border border-neutral-800">
+      <Canvas shadows camera={{ position: [2, 2, 5], fov: 45 }}>
+        <PerspectiveCamera makeDefault position={[3, 3, 3]} />
+        <Suspense fallback={null}>
+          <Stage environment="city" intensity={0.5} shadows="contact">
+            <Center>
+              <Model url={url} format={format} />
+            </Center>
+          </Stage>
+        </Suspense>
+        <OrbitControls makeDefault autoRotate autoRotateSpeed={0.5} />
+      </Canvas>
+    </div>
+  );
+};
+
+export default function App() {
+  const [image, setImage] = useState<File | null>(null);
+  const [imageUrl, setImageUrl] = useState<string | null>(() => localStorage.getItem("ARK_LAST_IMAGE_URL"));
+  const [externalUrl, setExternalUrl] = useState<string>(() => localStorage.getItem("ARK_LAST_EXTERNAL_URL") || "");
+  const [prompt, setPrompt] = useState(() => localStorage.getItem("ARK_LAST_PROMPT") || "");
+  const [meshQuality, setMeshQuality] = useState(() => localStorage.getItem("ARK_LAST_QUALITY") || "高");
+  const [fileFormat, setFileFormat] = useState(() => localStorage.getItem("ARK_LAST_FORMAT") || "OBJ");
+  const [status, setStatus] = useState<"idle" | "uploading" | "submitting" | "running" | "success" | "error">(() => {
+    const savedStatus = localStorage.getItem("ARK_CURRENT_STATUS") as any;
+    const savedTaskId = localStorage.getItem("ARK_CURRENT_TASK_ID");
+    return (savedTaskId && (savedStatus === "running" || savedStatus === "submitting" || savedStatus === "uploading")) ? "running" : "idle";
+  });
+  const [taskId, setTaskId] = useState<string | null>(() => localStorage.getItem("ARK_CURRENT_TASK_ID"));
+  const [resultUrl, setResultUrl] = useState<string | null>(() => localStorage.getItem("ARK_RESULT_URL"));
+  const [previewBlobUrl, setPreviewBlobUrl] = useState<string | null>(null);
+  const [extractStatus, setExtractStatus] = useState<{
+    phase: 'idle' | 'downloading' | 'extracting' | 'ready' | 'error';
+    progress: number;
+    message: string;
+  }>({ phase: 'idle', progress: 0, message: "" });
+  const [previewCache, setPreviewCache] = useState<Record<string, {url: string, format: string}>>({});
+  const [errorMessage, setErrorMessage] = useState("");
+  const [history, setHistory] = useState<any[]>(() => {
+    try {
+      const saved = localStorage.getItem("ARK_HISTORY");
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
+  const [logs, setLogs] = useState<{ time: string; msg: string; type: "info" | "success" | "error" | "warning" }[]>([]);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem("ARK_API_KEY") || "");
+  const [customEndpointId, setCustomEndpointId] = useState(() => localStorage.getItem("ARK_ENDPOINT_ID") || "");
+
+  useEffect(() => {
+    localStorage.setItem("ARK_API_KEY", customApiKey);
+  }, [customApiKey]);
+
+  useEffect(() => {
+    localStorage.setItem("ARK_ENDPOINT_ID", customEndpointId);
+  }, [customEndpointId]);
+
+  // Persistence effects
+  useEffect(() => {
+    if (taskId) localStorage.setItem("ARK_CURRENT_TASK_ID", taskId);
+    else localStorage.removeItem("ARK_CURRENT_TASK_ID");
+  }, [taskId]);
+
+  useEffect(() => {
+    localStorage.setItem("ARK_CURRENT_STATUS", status);
+    if (status === "idle" || status === "error") {
+       localStorage.removeItem("ARK_CURRENT_TASK_ID");
+    }
+  }, [status]);
+
+  useEffect(() => {
+    localStorage.setItem("ARK_HISTORY", JSON.stringify(history));
+  }, [history]);
+
+  useEffect(() => {
+    if (resultUrl) localStorage.setItem("ARK_RESULT_URL", resultUrl);
+    else localStorage.removeItem("ARK_RESULT_URL");
+  }, [resultUrl]);
+
+  useEffect(() => {
+    localStorage.setItem("ARK_LAST_QUALITY", meshQuality);
+    localStorage.setItem("ARK_LAST_FORMAT", fileFormat);
+    localStorage.setItem("ARK_LAST_PROMPT", prompt);
+    localStorage.setItem("ARK_LAST_EXTERNAL_URL", externalUrl);
+    if (imageUrl && !imageUrl.startsWith("blob:")) {
+      localStorage.setItem("ARK_LAST_IMAGE_URL", imageUrl);
+    }
+  }, [meshQuality, fileFormat, prompt, imageUrl, externalUrl]);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const addLog = (msg: string, type: "info" | "success" | "error" | "warning" = "info") => {
+    const time = new Date().toLocaleTimeString('en-GB', { hour12: false });
+    setLogs(prev => [...prev, { time, msg, type }].slice(-6)); // Keep last 6 logs
+  };
+
+  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      let file = e.target.files[0];
+      
+      // Compression options
+      const options = {
+        maxSizeMB: 9.5, // slightly under 10MB
+        maxWidthOrHeight: 2048,
+        useWebWorker: true,
+      };
+
+      try {
+        if (file.size > 9.5 * 1024 * 1024) {
+          addLog(`Image too large (${(file.size / 1024 / 1024).toFixed(2)}MB), compressing...`, "warning");
+          file = await imageCompression(file, options);
+          addLog(`Compressed to ${(file.size / 1024 / 1024).toFixed(2)}MB`, "success");
+        }
+        
+        setImage(file);
+        setImageUrl(URL.createObjectURL(file));
+        setExternalUrl("");
+        addLog(`Selected image: ${file.name}`);
+      } catch (error) {
+        console.error("Compression error:", error);
+        addLog("Compression failed, using original", "error");
+        setImage(file);
+        setImageUrl(URL.createObjectURL(file));
+      }
+    }
+  };
+
+  const getBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = error => reject(error);
+    });
+  };
+
+  const handleSubmit = async () => {
+    try {
+      let finalImageUrl = externalUrl || "";
+      
+      if (image) {
+        setStatus("uploading");
+        addLog(`正在准备图像数据...`);
+        finalImageUrl = await getBase64(image);
+        addLog(`图像已转换为 Base64`, "success");
+      }
+
+      if (!finalImageUrl) {
+        setErrorMessage("请提供图片 URL 或上传文件");
+        setStatus("error");
+        addLog("未提供源图像", "error");
+        return;
+      }
+
+      setStatus("submitting");
+      setResultUrl(null);
+      setPreviewBlobUrl(null);
+      addLog(`正在创建生成任务 (前端直连)...`);
+
+      const apiKey = customApiKey || import.meta.env.VITE_ARK_API_KEY;
+      const endpointId = customEndpointId || import.meta.env.VITE_ARK_ENDPOINT_ID || "doubao-seed3d-2-0-260328";
+
+      if (!apiKey) {
+        throw new Error("未配置 API Key (VITE_ARK_API_KEY)");
+      }
+
+      const res = await axios.post("https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks", {
+        model: endpointId,
+        content: [
+          {
+            type: "text",
+            text: ` --subdivisionlevel ${meshQuality === "高" ? "high" : meshQuality === "标准" ? "medium" : "low"} --fileformat ${fileFormat.toLowerCase()} ${prompt || ""}`.trim(),
+          },
+          {
+            type: "image_url",
+            image_url: {
+              url: finalImageUrl,
+            },
+          },
+        ],
+      }, { 
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        timeout: 45000 
+      });
+
+      if (res.data.id) {
+        const newTaskId = res.data.id;
+        setTaskId(newTaskId);
+        setStatus("running");
+        addLog(`任务创建成功! ID: ${newTaskId}`, "success");
+        
+        // Add to history immediately
+        const historyItem = {
+          id: newTaskId,
+          name: image ? image.name : (externalUrl?.split('/').pop() || '未命名'),
+          thumbnail: imageUrl,
+          type: fileFormat,
+          quality: meshQuality,
+          date: new Date().toLocaleTimeString(),
+          status: '处理中'
+        };
+        setHistory(prev => [historyItem, ...prev]);
+      } else {
+        throw new Error("接口未返回任务ID");
+      }
+    } catch (err: any) {
+      console.error("Submit error:", err);
+      const msg = err.response?.data?.error?.message || err.message || "任务提交失败";
+      setErrorMessage(msg);
+      setStatus("error");
+      addLog(`创建失败: ${msg}`, "error");
+    }
+  };
+
+  // Polling for task status
+  useEffect(() => {
+    let interval: any;
+    if (status === "running" && taskId) {
+      interval = setInterval(async () => {
+        try {
+          const apiKey = customApiKey || import.meta.env.VITE_ARK_API_KEY;
+          const res = await axios.get(`https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks/${taskId}`, { 
+            headers: {
+              "Authorization": `Bearer ${apiKey}`
+            } 
+          });
+          const taskData = res.data;
+
+          if (taskData.status === "success" || taskData.status === "succeeded") {
+            // 尝试从多个可能的字段中提取 URL
+            const url = taskData.content?.file_url ||
+                        taskData.result_url || 
+                        taskData.output_url || 
+                        (taskData.result && taskData.result.url) ||
+                        (taskData.result && Array.isArray(taskData.result) && taskData.result[0]?.url) ||
+                        (taskData.content && Array.isArray(taskData.content) && taskData.content[0]?.url) ||
+                        (taskData.output && taskData.output.model_url);
+
+            if (!url) {
+              addLog("任务成功但未找到结果链接，请检查控制台", "warning");
+              console.log("Full task data for debugging:", taskData);
+            }
+            setResultUrl(url);
+            setStatus("success");
+            addLog(`渲染完成`, "success");
+            setHistory(prev => prev.map(item => 
+              item.id === taskId 
+                ? { ...item, status: '成功', url } 
+                : item
+            ));
+            clearInterval(interval);
+          } else if (taskData.status === "failed") {
+            const errorMsg = taskData.error_message || (taskData.error && taskData.error.message) || "任务在服务器端失败";
+            setErrorMessage(errorMsg);
+            setStatus("error");
+            addLog(`任务失败: ${errorMsg}`, "error");
+            setHistory(prev => prev.map(item => 
+              item.id === taskId 
+                ? { ...item, status: '失败' } 
+                : item
+            ));
+            clearInterval(interval);
+          } else {
+            const progress = taskData.progress !== undefined ? taskData.progress : 0;
+            addLog(`正在生成中... (${progress}%)`, "info");
+          }
+        } catch (err: any) {
+          console.error("Polling error:", err);
+          const status = err.response?.status;
+          if (status === 401 || status === 403 || status === 404) {
+            setErrorMessage("查询状态请求失败");
+            setStatus("error");
+            clearInterval(interval);
+          }
+        }
+      }, 5000);
+    }
+    return () => clearInterval(interval);
+  }, [status, taskId, customApiKey]);
+
+
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const handleCopyId = (e: React.MouseEvent, id: string) => {
+    e.stopPropagation();
+    navigator.clipboard.writeText(id);
+    setCopiedId(id);
+    addLog(`Task ID 已拷贝: ${id}`, "info");
+    setTimeout(() => setCopiedId(null), 2000);
+  };
+
+  const handleFileDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+
+    if (file.name.toLowerCase().endsWith('.zip')) {
+      addLog(`本地手动解压: ${file.name}`, "info");
+      setExtractStatus({ phase: 'extracting', progress: 50, message: "正在读取本地 ZIP..." });
+      try {
+        const zip = await JSZip.loadAsync(file);
+        const files = Object.keys(zip.files);
+        const modelFileName = files.find(f => f.toLowerCase().endsWith('.glb') || f.toLowerCase().endsWith('.obj'));
+        if (modelFileName) {
+          const modelFile = zip.files[modelFileName];
+          const blob = await modelFile.async("blob");
+          const blobUrl = URL.createObjectURL(blob);
+          setPreviewBlobUrl(blobUrl);
+          setFileFormat(modelFileName.toLowerCase().endsWith('.glb') ? 'GLB' : 'OBJ');
+          setModelError(null);
+          setExtractStatus({ phase: 'ready', progress: 100, message: "本地加载完成" });
+        } else {
+          addLog("ZIP 内未找到模型文件", "error");
+        }
+      } catch (err) {
+        addLog("解析本地文件失败", "error");
+      }
+    } else if (file.name.toLowerCase().endsWith('.glb') || file.name.toLowerCase().endsWith('.obj')) {
+      const blobUrl = URL.createObjectURL(file);
+      setPreviewBlobUrl(blobUrl);
+      setFileFormat(file.name.toLowerCase().endsWith('.glb') ? 'GLB' : 'OBJ');
+      setModelError(null);
+      addLog(`本地手动加载: ${file.name}`, "success");
+    }
+  };
+
+  const handleDownload = (e: React.MouseEvent | null, url: string, name: string) => {
+    if (e) e.stopPropagation();
+    
+    // Direct download in pure browser
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name || "model";
+    // For many cross-origin downloads, we need target="_blank" and rel="noopener"
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    addLog(`触发浏览器下载流程...`, "info");
+  };
+
+  const [modelError, setModelError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    
+    const processResultUrl = async () => {
+      if (!resultUrl) {
+        setPreviewBlobUrl(null);
+        return;
+      }
+
+      // Check cache first
+      if (previewCache[resultUrl]) {
+        setPreviewBlobUrl(previewCache[resultUrl].url);
+        setFileFormat(previewCache[resultUrl].format);
+        setExtractStatus({ phase: 'ready', progress: 100, message: "来自缓存" });
+        return;
+      }
+
+      setModelError(null);
+      
+      const isZip = resultUrl.toLowerCase().includes(".zip");
+      
+      if (isZip) {
+        setExtractStatus({ phase: 'downloading', progress: 0, message: "正在获取资产数据..." });
+        addLog(`检测到 ZIP 容器，尝试代理提取...`, "info");
+        try {
+          const directUrl = resultUrl;
+          const proxiedUrl = `https://corsproxy.io/?${encodeURIComponent(directUrl)}`;
+          
+          let response;
+          try {
+            response = await axios.get(proxiedUrl, { 
+              responseType: 'arraybuffer',
+              onDownloadProgress: (progressEvent) => {
+                if (progressEvent.total) {
+                  const percent = (progressEvent.loaded / progressEvent.total) * 100;
+                  setExtractStatus(prev => ({ ...prev, progress: percent * 0.8 })); 
+                }
+              }
+            });
+          } catch (proxyErr) {
+            addLog("代理失败，尝试直通...", "warning");
+            response = await axios.get(directUrl, { 
+              responseType: 'arraybuffer',
+              onDownloadProgress: (progressEvent) => {
+                if (progressEvent.total) {
+                  const percent = (progressEvent.loaded / progressEvent.total) * 100;
+                  setExtractStatus(prev => ({ ...prev, progress: percent * 0.8 })); 
+                }
+              }
+            });
+          }
+          
+          if (!active) return;
+          setExtractStatus({ phase: 'extracting', progress: 85, message: "并行解压 3D 资产..." });
+
+          const zip = await JSZip.loadAsync(response.data);
+          
+          // Find 3D files
+          let modelFile: JSZip.JSZipObject | undefined;
+          let detectedFormat = "GLB";
+
+          const files = Object.keys(zip.files);
+          // GLB is preferred for performance
+          const glbFile = files.find(f => f.toLowerCase().endsWith(".glb"));
+          if (glbFile) {
+            modelFile = zip.files[glbFile];
+            detectedFormat = "GLB";
+          } else {
+            const objFile = files.find(f => f.toLowerCase().endsWith(".obj"));
+            if (objFile) {
+              modelFile = zip.files[objFile];
+              detectedFormat = "OBJ";
+            }
+          }
+
+          if (modelFile) {
+            setExtractStatus({ phase: 'extracting', progress: 95, message: "准备展示模型..." });
+            const blob = await modelFile.async("blob");
+            if (!active) return;
+            
+            const blobUrl = URL.createObjectURL(blob);
+            setPreviewBlobUrl(blobUrl);
+            setFileFormat(detectedFormat);
+            setPreviewCache(prev => ({ ...prev, [resultUrl]: { url: blobUrl, format: detectedFormat } }));
+            setExtractStatus({ phase: 'ready', progress: 100, message: "解析完成" });
+            addLog(`成功从 ZIP 中提取预览模型 (${detectedFormat})`, "success");
+          } else {
+            setModelError("该 ZIP 包中未找到可在线预览的 GLB 或 OBJ 格式。");
+            setExtractStatus({ phase: 'error', progress: 0, message: "缺失预览资产" });
+          }
+        } catch (err: any) {
+          console.error("Fetch/Zip error:", err);
+          const isCors = err.message?.includes('Network Error') || err.message?.includes('CORS') || err.code === 'ERR_NETWORK';
+          setModelError(isCors 
+            ? "CORS 拦截：浏览器安全策略阻止了模型预览。请先下载文件，然后将其拖入下方虚线框中即可离线预览。" 
+            : "生成内容解析失败，请尝试重新生成或下载。");
+          setExtractStatus({ phase: 'error', progress: 0, message: "预览受限" });
+          addLog(isCors ? "CORS 策略拦截了前端直读" : "解析错误", "error");
+        } finally {
+          if (active) {
+            setExtractStatus(prev => prev.phase === 'ready' ? prev : { phase: 'idle', progress: 0, message: "" });
+          }
+        }
+      } else {
+        // Direct model file
+        setPreviewBlobUrl(resultUrl);
+        setPreviewCache(prev => ({ ...prev, [resultUrl]: { url: resultUrl, format: fileFormat } }));
+        setExtractStatus({ phase: 'ready', progress: 100, message: "直连预览完成" });
+      }
+    };
+
+    processResultUrl();
+
+    return () => {
+      active = false;
+      // We don't revoke here because we are caching. 
+      // We should probably limit the cache size if memory is an issue.
+    };
+  }, [resultUrl, previewCache]);
+
+  const handleSelectHistoryItem = (item: any) => {
+    if (!item.id) return;
+    
+    addLog(`加载任务: ${item.id}`, "info");
+    setTaskId(item.id);
+    setResultUrl(item.url || null);
+    
+    if (item.status === '处理中') {
+      setStatus("running");
+    } else if (item.status === '成功') {
+      setStatus("success");
+    } else {
+      // Re-poll failed or other states
+      setStatus("running");
+    }
+  };
+
+  return (
+    <div className="h-screen w-full bg-[#020617] text-slate-200 font-sans flex flex-col overflow-hidden select-none">
+      {/* Top Navigation */}
+      <header className="h-16 border-b border-slate-800 flex items-center justify-between px-6 bg-slate-900/50 backdrop-blur-md shrink-0">
+        <div className="flex items-center space-x-4">
+          <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center font-bold text-white shadow-lg shadow-blue-900/20">V</div>
+          <h1 className="text-lg font-semibold tracking-tight text-white">VolcEngine <span className="text-blue-400">Seed3D</span></h1>
+        </div>
+        <div className="flex items-center space-x-6">
+          <div className="flex space-x-4 text-[10px] font-bold uppercase tracking-widest text-slate-500">
+            <a href="#" className="hover:text-blue-400 transition-colors">文档</a>
+            <button onClick={() => setIsSettingsOpen(true)} className="text-blue-400 hover:text-blue-300 transition-colors uppercase cursor-pointer">设置</button>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left Controls Panel */}
+        <aside className="w-80 border-r border-slate-800 bg-slate-900/30 p-6 flex flex-col space-y-8 overflow-y-auto invisible-scrollbar">
+          <div className="space-y-4">
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <span className="text-xs text-slate-400 mb-2 block">模型精度</span>
+                  <select 
+                    value={meshQuality}
+                    onChange={(e) => setMeshQuality(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 px-2 py-1.5 rounded text-xs text-white focus:ring-1 focus:ring-blue-500 outline-none transition-all appearance-none cursor-pointer"
+                  >
+                    <option>高</option>
+                    <option>标准</option>
+                    <option>低</option>
+                  </select>
+                </div>
+                <div>
+                  <span className="text-xs text-slate-400 mb-2 block">文件格式</span>
+                  <select 
+                    value={fileFormat}
+                    onChange={(e) => setFileFormat(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 px-2 py-1.5 rounded text-xs text-white focus:ring-1 focus:ring-blue-500 outline-none transition-all appearance-none cursor-pointer"
+                  >
+                    <option>OBJ</option>
+                    <option>GLB</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            <label className="text-[10px] font-bold uppercase tracking-widest text-slate-500">源图像</label>
+            <div 
+              onClick={() => fileInputRef.current?.click()}
+              className={`
+                group relative aspect-square w-full rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all overflow-hidden
+                ${imageUrl ? 'border-blue-500/50 bg-blue-500/5' : 'border-slate-700 hover:border-blue-500 bg-slate-800/30'}
+              `}
+            >
+              {imageUrl ? (
+                <>
+                  <img src={imageUrl} className="absolute inset-0 w-full h-full object-cover opacity-60" alt="Input" />
+                  <div className="relative z-10 flex flex-col items-center p-3 bg-slate-900/80 rounded-lg border border-slate-700 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <ImageIcon className="w-5 h-5 text-blue-400 mb-1" />
+                    <span className="text-[10px] font-medium text-slate-300 uppercase tracking-tight">更换图片</span>
+                  </div>
+                </>
+              ) : (
+                <div className="flex flex-col items-center p-4">
+                  <Upload className="w-8 h-8 text-slate-600 group-hover:text-blue-400 mb-2 transition-colors" />
+                  <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">点击或拖拽上传</span>
+                </div>
+              )}
+              <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="image/*" />
+            </div>
+          </div>
+
+          <div className="mt-auto pt-4">
+            <button 
+              onClick={handleSubmit}
+              disabled={status !== "idle" && status !== "error" && status !== "success"}
+              className={`
+                w-full py-3 rounded-xl font-bold text-sm transition-all shadow-lg active:scale-95 flex items-center justify-center gap-2
+                ${status === 'idle' || status === 'error' || status === 'success' 
+                  ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-600/20' 
+                  : 'bg-slate-800 text-slate-500 cursor-not-allowed'}
+              `}
+            >
+              {status === 'running' ? (
+                <Loader2 className="w-4 h-4 animate-spin" />
+              ) : <Send className="w-4 h-4" />}
+              {status === 'running' ? '生成中...' : '开始生成 3D 模型'}
+            </button>
+          </div>
+        </aside>
+
+        {/* Main Viewport Area */}
+        <main className="flex-1 flex flex-col relative bg-[radial-gradient(circle_at_center,_var(--tw-gradient-stops))] from-slate-900 via-slate-950 to-slate-950">
+          {/* Active Preview */}
+          <div className="flex-1 flex flex-col items-center justify-center relative">
+            {/* Grid Background */}
+            <div className="absolute inset-0 opacity-10 bg-[linear-gradient(rgba(255,255,255,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none"></div>
+            
+            <AnimatePresence mode="wait">
+              {status === "success" && resultUrl ? (
+                <motion.div 
+                  key="result"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  className="w-full h-full relative flex items-center justify-center p-8"
+                >
+                  {extractStatus.phase === 'downloading' || extractStatus.phase === 'extracting' ? (
+                    <motion.div 
+                      key="extracting"
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      className="text-center space-y-6 w-full max-w-md mx-auto"
+                    >
+                      <div className="relative w-20 h-20 mx-auto mb-6">
+                        <Loader2 className="w-full h-full text-blue-500 animate-spin absolute inset-0 opacity-20" />
+                        <div className="absolute inset-0 flex items-center justify-center">
+                          <span className="text-[10px] font-mono font-bold text-blue-400">{Math.round(extractStatus.progress)}%</span>
+                        </div>
+                        <motion.div 
+                          className="absolute inset-0 border-2 border-blue-500 rounded-full border-t-transparent"
+                          animate={{ rotate: 360 }}
+                          transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                        />
+                      </div>
+
+                      <div className="space-y-2">
+                        <h3 className="text-sm font-black text-white uppercase tracking-[0.2em]">{extractStatus.message}</h3>
+                        <div className="w-full h-1 bg-slate-800 rounded-full overflow-hidden">
+                          <motion.div 
+                            className="h-full bg-blue-500 shadow-[0_0_10px_rgba(59,130,246,0.5)]"
+                            initial={{ width: 0 }}
+                            animate={{ width: `${extractStatus.progress}%` }}
+                          />
+                        </div>
+                        <div className="flex justify-between items-center px-1">
+                          <span className="text-[9px] font-mono text-slate-500">PHASE: {extractStatus.phase.toUpperCase()}</span>
+                          <span className="text-[9px] font-mono text-slate-500">TASK: {taskId?.slice(0, 12)}</span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ) : modelError ? (
+                    <motion.div 
+                      key="error-box"
+                      initial={{ scale: 0.9, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      className="text-center space-y-4 max-w-sm bg-slate-900/50 backdrop-blur-md p-8 rounded-3xl border border-slate-800"
+                      onDragOver={(e) => e.preventDefault()}
+                      onDrop={handleFileDrop}
+                    >
+                      <div className="w-16 h-16 bg-blue-500/10 rounded-full flex items-center justify-center mx-auto mb-2 border border-dashed border-blue-500/40">
+                        <UploadCloud className="w-8 h-8 text-blue-500" />
+                      </div>
+                      <h3 className="text-lg font-bold text-white">预览辅助加载</h3>
+                      <p className="text-[11px] text-slate-400 leading-relaxed px-4">{modelError}</p>
+                      
+                      <div className="space-y-3 pt-2">
+                        <button 
+                          onClick={() => handleDownload(null, resultUrl!, `model_${taskId}.zip`)}
+                          className="bg-blue-600 hover:bg-blue-500 text-white px-6 py-2.5 rounded-xl text-xs font-bold transition-all shadow-lg shadow-blue-600/20 active:scale-95 w-full flex items-center justify-center gap-2"
+                        >
+                           <Download className="w-3.5 h-3.5" /> 第一步：下载文件
+                        </button>
+                        
+                        <div className="bg-slate-950/60 border border-dashed border-slate-700 p-3 rounded-xl text-[10px] text-slate-500 font-medium">
+                          第二步：将下载的文件 拖拽到这里
+                        </div>
+
+                        <button 
+                          onClick={() => setStatus("idle")}
+                          className="text-slate-600 hover:text-slate-500 text-[10px] font-bold uppercase tracking-widest pt-2"
+                        >
+                           忽略并返回
+                        </button>
+                      </div>
+                    </motion.div>
+                  ) : previewBlobUrl ? (
+                    <>
+                      <ModelViewer 
+                        url={previewBlobUrl} 
+                        format={fileFormat} 
+                      />
+                      <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex space-x-3 pointer-events-auto">
+                        <button 
+                          onClick={() => {
+                            setStatus("idle");
+                            setResultUrl(null);
+                            setTaskId(null);
+                          }}
+                          className="p-2.5 bg-slate-900/90 rounded-xl border border-slate-700 hover:text-red-400 transition-colors shadow-xl group"
+                          title="关闭预览"
+                        >
+                          <XCircle className="w-5 h-5" />
+                        </button>
+                        <button 
+                          onClick={() => handleDownload(null, resultUrl, `model_${taskId}.${fileFormat.toLowerCase()}`)}
+                          className="p-2.5 bg-slate-900/90 rounded-xl border border-slate-700 hover:text-blue-400 transition-colors shadow-xl"
+                        >
+                          <Download className="w-5 h-5" />
+                        </button>
+                        <div className="bg-slate-900/90 px-4 py-2 rounded-xl border border-slate-700 text-[10px] font-mono text-blue-400 flex items-center">
+                          预览 ID: {taskId?.slice(0, 8)}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <div className="text-slate-500 font-mono text-xs uppercase tracking-widest">初始化预览器中...</div>
+                  )}
+                </motion.div>
+              ) : (status === "running" || status === "submitting" || status === "uploading") ? (
+                <motion.div 
+                  key="running"
+                  className="relative flex flex-col items-center"
+                >
+                   <div className="w-72 h-72 border-2 border-blue-500/20 rounded-full flex items-center justify-center">
+                      <div className="w-60 h-60 border border-blue-400/10 rounded-full animate-ping"></div>
+                   </div>
+                   <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-center pointer-events-none">
+                     <Loader2 className="w-16 h-16 text-blue-500 mx-auto mb-4 animate-spin" />
+                     <div className="bg-slate-900/80 px-4 py-1.5 rounded-full border border-slate-700 text-xs font-mono text-blue-400 animate-pulse uppercase">
+                        {status === 'uploading' ? '正在上传...' : '正在处理...'}
+                     </div>
+                   </div>
+                </motion.div>
+              ) : status === "error" ? (
+                <motion.div className="text-center p-8 space-y-4 max-w-sm">
+                  <XCircle className="w-16 h-16 text-red-500/80 mx-auto" />
+                  <p className="text-sm text-slate-400">{errorMessage}</p>
+                  <button onClick={() => setStatus('idle')} className="text-xs font-bold text-blue-400 uppercase tracking-widest hover:text-blue-300">重试</button>
+                </motion.div>
+              ) : (
+                <motion.div className="text-center opacity-30 select-none">
+                  <Box className="w-24 h-24 text-slate-600 mx-auto mb-4" />
+                  <p className="text-sm font-bold uppercase tracking-[0.2em] text-slate-500">等待任务输入</p>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
+
+          {/* Task Status / Console */}
+          <div className="h-44 bg-slate-950/80 border-t border-slate-800 p-4 font-mono overflow-hidden shrink-0">
+            <div className="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
+              <span className="text-[10px] text-slate-500 uppercase font-black tracking-widest">系统监控</span>
+              <span className="flex items-center text-[10px] text-blue-500/80 font-bold">
+                <span className="w-2 h-2 rounded-full bg-blue-500 mr-2 animate-pulse"></span> 
+                ARK_SEED3D_2.0_准备就绪
+              </span>
+            </div>
+            <div className="text-[11px] space-y-1.5 overflow-y-auto max-h-24 custom-scrollbar">
+              {logs.length === 0 && <p className="text-slate-600 italic">尚未检测到系统活动...</p>}
+              {logs.map((log, i) => (
+                <p key={i} className="flex">
+                  <span className="text-blue-500/50 w-20 leading-none shrink-0">[{log.time}]</span>
+                  <span className={`
+                    ${log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-slate-300'}
+                    leading-none
+                  `}>
+                    {log.msg}
+                  </span>
+                </p>
+              ))}
+            </div>
+          </div>
+        </main>
+
+        {/* Right History Panel */}
+        <aside className="w-64 border-l border-slate-800 bg-slate-900/30 flex flex-col shrink-0 overflow-hidden">
+          <div className="p-4 border-b border-slate-800">
+            <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 leading-none">历史记录</span>
+          </div>
+          <div className="flex-1 overflow-y-auto space-y-2 p-2 custom-scrollbar">
+            {history.length === 0 && (
+              <div className="flex flex-col items-center justify-center h-full opacity-20 p-4 text-center">
+                <Settings className="w-8 h-8 mb-2" />
+                <p className="text-[10px] uppercase font-bold tracking-tighter">生成的模型将显示在这里</p>
+              </div>
+            )}
+            {history.map((item, i) => (
+              <div 
+                key={i} 
+                onClick={() => handleSelectHistoryItem(item)}
+                className={`
+                  p-3 rounded-lg border transition-all cursor-pointer group
+                  ${taskId === item.id 
+                    ? 'bg-blue-500/10 border-blue-500/50 ring-1 ring-blue-500/20' 
+                    : item.status === '成功' 
+                      ? 'bg-blue-500/5 border-blue-500/20 hover:border-blue-500/40' 
+                      : 'bg-slate-800/10 border-slate-800 hover:border-slate-700'
+                  }
+                `}
+              >
+                <div className="flex justify-between items-start mb-2 gap-3">
+                  <div className="flex items-center gap-2 overflow-hidden">
+                    {item.thumbnail && (
+                      <div className="w-8 h-8 rounded bg-slate-800 shrink-0 overflow-hidden border border-slate-700">
+                        <img src={item.thumbnail} className="w-full h-full object-cover" alt="" />
+                      </div>
+                    )}
+                    <span className={`text-[11px] font-bold truncate ${item.status === '成功' ? 'text-blue-400' : 'text-slate-400'}`}>
+                      {item.name}
+                    </span>
+                  </div>
+                  <span className="text-[9px] text-slate-600 whitespace-nowrap">{item.date}</span>
+                </div>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className={`
+                      px-1.5 py-0.5 rounded text-[8px] uppercase font-black
+                      ${item.status === '成功' ? 'bg-green-500/10 text-green-400' : item.status === '处理中' ? 'bg-blue-500/10 text-blue-400 animate-pulse' : 'bg-red-500/10 text-red-400'}
+                    `}>
+                      {item.status}
+                    </span>
+                    {item.id && (
+                      <button 
+                        onClick={(e) => handleCopyId(e, item.id)}
+                        className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-1.5 py-0.5 rounded-sm transition-colors flex items-center gap-1 text-[9px]"
+                        title="复制任务ID"
+                      >
+                        {copiedId === item.id ? (
+                          <>
+                            <Check className="w-2.5 h-2.5 text-green-400" />
+                            <span className="text-green-400">已复制</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-2.5 h-2.5" />
+                            <span>ID</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+                    {item.status === '成功' && item.url && (
+                      <button 
+                        onClick={(e) => handleDownload(e, item.url, `${item.name}.${item.type.toLowerCase()}`)}
+                        className="bg-blue-600 hover:bg-blue-500 text-white px-2 py-0.5 rounded-sm transition-all flex items-center gap-1 text-[9px] shadow-lg shadow-blue-500/20"
+                        title="下载 3D 模型"
+                      >
+                        <Download className="w-2.5 h-2.5" />
+                        <span className="font-bold">下载</span>
+                      </button>
+                    )}
+                  </div>
+                  <span className="text-[9px] text-slate-500 italic font-medium">{item.type} / {item.quality}</span>
+                </div>
+                {item.status === '成功' && (
+                   <div className="mt-2 text-[10px] text-blue-500 opacity-0 group-hover:opacity-100 transition-opacity font-bold uppercase flex items-center gap-1">
+                      加载资产 <Send className="w-2 h-2" />
+                   </div>
+                )}
+              </div>
+            ))}
+          </div>
+          
+          <div className="p-4 mt-auto border-t border-slate-800 flex items-center justify-center">
+            <button 
+              onClick={() => setHistory([])}
+              className="text-[9px] font-black text-slate-500 hover:text-slate-300 uppercase tracking-widest transition-colors"
+            >
+              清空记录
+            </button>
+          </div>
+        </aside>
+      </div>
+
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {isSettingsOpen && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm p-4"
+            onClick={() => setIsSettingsOpen(false)}
+          >
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="bg-slate-900 border border-slate-800 rounded-3xl p-8 w-full max-w-md shadow-2xl space-y-6"
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="space-y-2">
+                <h3 className="text-2xl font-bold text-white flex items-center gap-3">
+                  <Settings className="w-7 h-7 text-blue-500" />
+                  设置
+                </h3>
+                <p className="text-sm text-slate-400">配置您的火山引擎 Ark API 密钥。</p>
+              </div>
+
+              <div className="space-y-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">ARK_API_KEY</label>
+                  <input 
+                    type="password"
+                    placeholder="输入您的 API Key..."
+                    value={customApiKey}
+                    onChange={(e) => setCustomApiKey(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-200 focus:border-blue-500 outline-none transition-all"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">ENDPOINT_ID / 模型 ID (可选)</label>
+                  <input 
+                    type="text"
+                    placeholder="默认: doubao-seed3d-2-0-260328"
+                    value={customEndpointId}
+                    onChange={(e) => setCustomEndpointId(e.target.value)}
+                    className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-sm text-slate-200 focus:border-blue-500 outline-none transition-all"
+                  />
+                  <p className="text-[10px] text-slate-500 italic">如果您创建了私有部署端点，请在此输入端点 ID。</p>
+                </div>
+                <p className="text-[10px] text-slate-500 italic pt-2 border-t border-slate-800">设置将保存在本地浏览器缓存中。</p>
+              </div>
+
+              <div className="pt-4">
+                <button 
+                  onClick={() => setIsSettingsOpen(false)}
+                  className="w-full py-4 bg-blue-600 hover:bg-blue-500 text-white rounded-2xl font-bold transition-all shadow-xl shadow-blue-600/20 active:scale-[0.98]"
+                >
+                  保存并关闭
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
+
