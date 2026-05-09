@@ -101,6 +101,8 @@ export default function App() {
     }
   });
   const [logs, setLogs] = useState<{ time: string; msg: string; type: "info" | "success" | "error" | "warning" }[]>([]);
+  const [isProcessingImage, setIsProcessingImage] = useState(false);
+  const [imageProgress, setImageProgress] = useState(0);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem("ARK_API_KEY") || "");
   const [customEndpointId, setCustomEndpointId] = useState(() => localStorage.getItem("ARK_ENDPOINT_ID") || "");
@@ -173,11 +175,15 @@ export default function App() {
     if (e.target.files && e.target.files[0]) {
       let file = e.target.files[0];
       
+      setIsProcessingImage(true);
+      setImageProgress(0);
+
       // Strict constraint for Volcengine API: max 4096px, we use 2048px for better compatibility and speed
       const options = {
         maxSizeMB: 9,
         maxWidthOrHeight: 2048,
         useWebWorker: true,
+        onProgress: (p: number) => setImageProgress(p),
       };
 
       try {
@@ -194,6 +200,9 @@ export default function App() {
         addLog("图像处理失败，将尝试直接使用原图", "warning");
         setImage(file);
         setImageUrl(URL.createObjectURL(file));
+      } finally {
+        setIsProcessingImage(false);
+        setImageProgress(0);
       }
     }
   };
@@ -614,13 +623,20 @@ export default function App() {
           <div className="space-y-4">
             <label className="text-[10px] font-bold uppercase tracking-widest text-slate-500">源图像</label>
             <div 
-              onClick={() => fileInputRef.current?.click()}
+              onClick={() => !isProcessingImage && fileInputRef.current?.click()}
               className={`
                 group relative aspect-square w-full rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all overflow-hidden
-                ${imageUrl ? 'border-blue-500/50 bg-blue-500/5' : 'border-slate-700 hover:border-blue-500 bg-slate-800/30'}
+                ${isProcessingImage ? 'border-blue-500/30 bg-blue-500/5 cursor-wait' : imageUrl ? 'border-blue-500/50 bg-blue-500/5' : 'border-slate-700 hover:border-blue-500 bg-slate-800/30'}
               `}
             >
-              {imageUrl ? (
+              {isProcessingImage ? (
+                <div className="flex flex-col items-center p-4 space-y-3">
+                  <div className="flex items-center justify-center">
+                    <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
+                  </div>
+                  <span className="text-[10px] font-bold text-white uppercase tracking-widest text-center">正在优化图像...</span>
+                </div>
+              ) : imageUrl ? (
                 <>
                   <img src={imageUrl} className="absolute inset-0 w-full h-full object-cover opacity-60" alt="Input" />
                   <div className="relative z-10 flex flex-col items-center p-3 bg-slate-900/80 rounded-lg border border-slate-700 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -634,7 +650,7 @@ export default function App() {
                   <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest text-center">点击或拖拽上传</span>
                 </div>
               )}
-              <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="image/*" />
+              <input type="file" ref={fileInputRef} onChange={handleFileChange} className="hidden" accept="image/*" disabled={isProcessingImage} />
             </div>
           </div>
 
