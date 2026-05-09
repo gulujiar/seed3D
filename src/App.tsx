@@ -102,6 +102,7 @@ export default function App() {
   });
   const [logs, setLogs] = useState<{ time: string; msg: string; type: "info" | "success" | "error" | "warning" }[]>([]);
   const [isProcessingImage, setIsProcessingImage] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   const [imageProgress, setImageProgress] = useState(0);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem("ARK_API_KEY") || "");
@@ -171,39 +172,59 @@ export default function App() {
     setLogs(prev => [...prev, { time, msg, type }].slice(-6)); // Keep last 6 logs
   };
 
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      let file = e.target.files[0];
+  const processImageFile = async (file: File) => {
+    setIsProcessingImage(true);
+    setImageProgress(0);
+
+    // Strict constraint for Volcengine API: max 4096px, we use 2048px for better compatibility and speed
+    const options = {
+      maxSizeMB: 9,
+      maxWidthOrHeight: 2048,
+      useWebWorker: true,
+      onProgress: (p: number) => setImageProgress(p),
+    };
+
+    try {
+      addLog(`正在处理图像: ${file.name}...`, "info");
+      // Always run through compression to ensure dimensions are within bounds
+      const compressedFile = await imageCompression(file, options);
+      addLog(`处理完成: ${(compressedFile.size / 1024 / 1024).toFixed(2)}MB`, "success");
       
-      setIsProcessingImage(true);
+      setImage(compressedFile);
+      setImageUrl(URL.createObjectURL(compressedFile));
+      setExternalUrl("");
+    } catch (error) {
+      console.error("Image processing error:", error);
+      addLog("图像处理失败，将尝试直接使用原图", "warning");
+      setImage(file);
+      setImageUrl(URL.createObjectURL(file));
+    } finally {
+      setIsProcessingImage(false);
       setImageProgress(0);
+    }
+  };
 
-      // Strict constraint for Volcengine API: max 4096px, we use 2048px for better compatibility and speed
-      const options = {
-        maxSizeMB: 9,
-        maxWidthOrHeight: 2048,
-        useWebWorker: true,
-        onProgress: (p: number) => setImageProgress(p),
-      };
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files[0]) {
+      processImageFile(e.target.files[0]);
+    }
+  };
 
-      try {
-        addLog(`正在处理图像: ${file.name}...`, "info");
-        // Always run through compression to ensure dimensions are within bounds
-        file = await imageCompression(file, options);
-        addLog(`处理完成: ${(file.size / 1024 / 1024).toFixed(2)}MB`, "success");
-        
-        setImage(file);
-        setImageUrl(URL.createObjectURL(file));
-        setExternalUrl("");
-      } catch (error) {
-        console.error("Image processing error:", error);
-        addLog("图像处理失败，将尝试直接使用原图", "warning");
-        setImage(file);
-        setImageUrl(URL.createObjectURL(file));
-      } finally {
-        setIsProcessingImage(false);
-        setImageProgress(0);
-      }
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    if (!isProcessingImage) setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (!isProcessingImage && e.dataTransfer.files && e.dataTransfer.files[0]) {
+      processImageFile(e.dataTransfer.files[0]);
     }
   };
 
@@ -624,12 +645,20 @@ export default function App() {
             <label className="text-[10px] font-bold uppercase tracking-widest text-slate-500">源图像</label>
             <div 
               onClick={() => !isProcessingImage && fileInputRef.current?.click()}
+              onDragOver={handleDragOver}
+              onDragLeave={handleDragLeave}
+              onDrop={handleDrop}
               className={`
                 group relative aspect-square w-full rounded-xl border-2 border-dashed flex flex-col items-center justify-center cursor-pointer transition-all overflow-hidden
-                ${isProcessingImage ? 'border-blue-500/30 bg-blue-500/5 cursor-wait' : imageUrl ? 'border-blue-500/50 bg-blue-500/5' : 'border-slate-700 hover:border-blue-500 bg-slate-800/30'}
+                ${isDragging ? 'border-blue-500 bg-blue-500/10 scale-[1.02]' : isProcessingImage ? 'border-blue-500/30 bg-blue-500/5 cursor-wait' : imageUrl ? 'border-blue-500/50 bg-blue-500/5' : 'border-slate-700 hover:border-blue-500 bg-slate-800/30'}
               `}
             >
-              {isProcessingImage ? (
+              {isDragging ? (
+                <div className="flex flex-col items-center animate-pulse">
+                  <Box className="w-12 h-12 text-blue-500 mb-2" />
+                  <span className="text-xs font-bold text-blue-400 uppercase tracking-widest">松开即刻上传</span>
+                </div>
+              ) : isProcessingImage ? (
                 <div className="flex flex-col items-center p-4 space-y-3">
                   <div className="flex items-center justify-center">
                     <Loader2 className="w-8 h-8 animate-spin text-blue-500" />
