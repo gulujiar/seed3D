@@ -16,6 +16,7 @@ import {
   Settings,
   Copy,
   Check,
+  Plus,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import axios from "axios";
@@ -36,16 +37,32 @@ const Model = ({ url, format }: { url: string; format: string }) => {
 const ModelViewer = ({ url, format }: { url: string; format: string }) => {
   return (
     <div className="w-full h-full bg-neutral-900 rounded-xl overflow-hidden relative border border-neutral-800">
-      <Canvas shadows camera={{ position: [2, 2, 5], fov: 45 }}>
+      <Canvas 
+        shadows 
+        dpr={[1, 1.5]} 
+        camera={{ position: [2, 2, 5], fov: 45 }}
+        gl={{ antialias: true, preserveDrawingBuffer: true }}
+      >
         <PerspectiveCamera makeDefault position={[3, 3, 3]} />
         <Suspense fallback={null}>
-          <Stage environment="city" intensity={0.5} shadows="contact">
+          <Stage 
+            environment="city" 
+            intensity={0.5} 
+            adjustCamera 
+            shadows={{ type: 'contact', opacity: 0.4, blur: 2 }}
+          >
             <Center>
               <Model url={url} format={format} />
             </Center>
           </Stage>
         </Suspense>
-        <OrbitControls makeDefault autoRotate autoRotateSpeed={0.5} />
+        <OrbitControls 
+          makeDefault 
+          enableDamping={true}
+          dampingFactor={0.05}
+          autoRotate={false} 
+          autoRotateSpeed={0.5} 
+        />
       </Canvas>
     </div>
   );
@@ -72,6 +89,7 @@ export default function App() {
     message: string;
   }>({ phase: 'idle', progress: 0, message: "" });
   const [previewCache, setPreviewCache] = useState<Record<string, {url: string, format: string}>>({});
+  const [showMonitor, setShowMonitor] = useState(false);
   const [errorMessage, setErrorMessage] = useState("");
   const [history, setHistory] = useState<any[]>(() => {
     try {
@@ -85,6 +103,8 @@ export default function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [customApiKey, setCustomApiKey] = useState(() => localStorage.getItem("ARK_API_KEY") || "");
   const [customEndpointId, setCustomEndpointId] = useState(() => localStorage.getItem("ARK_ENDPOINT_ID") || "");
+  const [isManualAddOpen, setIsManualAddOpen] = useState(false);
+  const [manualTaskIdInput, setManualTaskIdInput] = useState("");
 
   useEffect(() => {
     localStorage.setItem("ARK_API_KEY", customApiKey);
@@ -93,6 +113,21 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("ARK_ENDPOINT_ID", customEndpointId);
   }, [customEndpointId]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Avoid toggling when user is typing in the prompt input
+      if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+        return;
+      }
+      if (e.key.toLowerCase() === "k") {
+        setShowMonitor(prev => !prev);
+        addLog(`监控面板已${!showMonitor ? '开启' : '关闭'}`, "info");
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showMonitor]);
 
   // Persistence effects
   useEffect(() => {
@@ -475,6 +510,41 @@ export default function App() {
     }
   };
 
+  const handleManualAdd = () => {
+    if (!manualTaskIdInput.trim()) return;
+    
+    const trimmedId = manualTaskIdInput.trim();
+    
+    // Check if already in history
+    if (history.find(h => h.id === trimmedId)) {
+      addLog(`该任务 ID 已在记录中`, "warning");
+      const existingItem = history.find(h => h.id === trimmedId);
+      handleSelectHistoryItem(existingItem);
+      setManualTaskIdInput("");
+      setIsManualAddOpen(false);
+      return;
+    }
+
+    const newItem = {
+      id: trimmedId,
+      name: "手动添加",
+      thumbnail: null,
+      type: "OBJ", 
+      quality: "未知",
+      date: new Date().toLocaleTimeString(),
+      status: '处理中'
+    };
+
+    setHistory(prev => [newItem, ...prev]);
+    setTaskId(trimmedId);
+    setStatus("running");
+    setResultUrl(null);
+    setPreviewBlobUrl(null);
+    setManualTaskIdInput("");
+    setIsManualAddOpen(false);
+    addLog(`手动添加任务: ${trimmedId}`, "success");
+  };
+
   return (
     <div className="h-screen w-full bg-[#020617] text-slate-200 font-sans flex flex-col overflow-hidden select-none">
       {/* Top Navigation */}
@@ -674,7 +744,10 @@ export default function App() {
                       </div>
                     </>
                   ) : (
-                    <div className="text-slate-500 font-mono text-xs uppercase tracking-widest">初始化预览器中...</div>
+                    <div className="text-slate-500 font-mono text-xs uppercase tracking-widest flex flex-col items-center gap-4">
+                      <Loader2 className="w-8 h-8 animate-spin text-slate-700" />
+                      <span>正在准备预览内容...</span>
+                    </div>
                   )}
                 </motion.div>
               ) : (status === "running" || status === "submitting" || status === "uploading") ? (
@@ -708,36 +781,93 @@ export default function App() {
           </div>
 
           {/* Task Status / Console */}
-          <div className="h-44 bg-slate-950/80 border-t border-slate-800 p-4 font-mono overflow-hidden shrink-0">
-            <div className="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
-              <span className="text-[10px] text-slate-500 uppercase font-black tracking-widest">系统监控</span>
-              <span className="flex items-center text-[10px] text-blue-500/80 font-bold">
-                <span className="w-2 h-2 rounded-full bg-blue-500 mr-2 animate-pulse"></span> 
-                ARK_SEED3D_2.0_准备就绪
-              </span>
-            </div>
-            <div className="text-[11px] space-y-1.5 overflow-y-auto max-h-24 custom-scrollbar">
-              {logs.length === 0 && <p className="text-slate-600 italic">尚未检测到系统活动...</p>}
-              {logs.map((log, i) => (
-                <p key={i} className="flex">
-                  <span className="text-blue-500/50 w-20 leading-none shrink-0">[{log.time}]</span>
-                  <span className={`
-                    ${log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-slate-300'}
-                    leading-none
-                  `}>
-                    {log.msg}
+          <AnimatePresence>
+            {showMonitor && (
+              <motion.div 
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: 176, opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="bg-slate-950/80 border-t border-slate-800 p-4 font-mono overflow-hidden shrink-0"
+              >
+                <div className="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
+                  <span className="text-[10px] text-slate-500 uppercase font-black tracking-widest">系统监控 (按 "K" 隐藏)</span>
+                  <span className="flex items-center text-[10px] text-blue-500/80 font-bold">
+                    <span className="w-2 h-2 rounded-full bg-blue-500 mr-2 animate-pulse"></span> 
+                    ARK_SEED3D_2.0_准备就绪
                   </span>
-                </p>
-              ))}
-            </div>
-          </div>
+                </div>
+                <div className="text-[11px] space-y-1.5 overflow-y-auto max-h-24 custom-scrollbar">
+                  {logs.length === 0 && <p className="text-slate-600 italic">尚未检测到系统活动...</p>}
+                  {logs.map((log, i) => (
+                    <p key={i} className="flex">
+                      <span className="text-blue-500/50 w-20 leading-none shrink-0">[{log.time}]</span>
+                      <span className={`
+                        ${log.type === 'error' ? 'text-red-400' : log.type === 'success' ? 'text-green-400' : log.type === 'warning' ? 'text-yellow-400' : 'text-slate-300'}
+                        leading-none
+                      `}>
+                        {log.msg}
+                      </span>
+                    </p>
+                  ))}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </main>
 
         {/* Right History Panel */}
         <aside className="w-64 border-l border-slate-800 bg-slate-900/30 flex flex-col shrink-0 overflow-hidden">
-          <div className="p-4 border-b border-slate-800">
+          <div className="p-4 border-b border-slate-800 flex items-center justify-between">
             <span className="text-[10px] font-bold uppercase tracking-widest text-slate-500 leading-none">历史记录</span>
+            <button 
+              onClick={() => setIsManualAddOpen(!isManualAddOpen)}
+              className={`p-1.5 rounded-md transition-colors ${isManualAddOpen ? 'bg-blue-600/20 text-blue-400' : 'hover:bg-white/5 text-slate-500'}`}
+              title="手动添加任务 ID"
+            >
+              <Plus className={`w-3.5 h-3.5 transition-transform ${isManualAddOpen ? 'rotate-45' : ''}`} />
+            </button>
           </div>
+          
+          <AnimatePresence>
+            {isManualAddOpen && (
+              <motion.div 
+                initial={{ height: 0, opacity: 0 }}
+                animate={{ height: "auto", opacity: 1 }}
+                exit={{ height: 0, opacity: 0 }}
+                className="overflow-hidden border-b border-slate-800/50"
+              >
+                <div className="p-3 space-y-2">
+                  <input 
+                    type="text" 
+                    placeholder="输入任务 ID..."
+                    value={manualTaskIdInput}
+                    onChange={(e) => setManualTaskIdInput(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleManualAdd()}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-1.5 text-xs text-white focus:border-blue-500/50 outline-none placeholder:text-slate-700 font-mono transition-all"
+                  />
+                  <div className="flex gap-2">
+                    <button 
+                      onClick={handleManualAdd}
+                      disabled={!manualTaskIdInput.trim()}
+                      className="flex-1 bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 text-[10px] font-bold py-1.5 rounded-md transition-all active:scale-95 disabled:opacity-50"
+                    >
+                      确认添加
+                    </button>
+                    <button 
+                      onClick={() => {
+                        setIsManualAddOpen(false);
+                        setManualTaskIdInput("");
+                      }}
+                      className="px-2 border border-slate-800 text-slate-500 text-[10px] py-1.5 rounded-md hover:bg-white/5 transition-all"
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           <div className="flex-1 overflow-y-auto space-y-2 p-2 custom-scrollbar">
             {history.length === 0 && (
               <div className="flex flex-col items-center justify-center h-full opacity-20 p-4 text-center">
